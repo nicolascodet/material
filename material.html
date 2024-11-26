@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raw Materials Check</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/tailwindcss/2.2.19/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-50 p-4">
+    <div class="max-w-lg mx-auto bg-white rounded-xl shadow-lg p-6">
+        <h1 class="text-2xl font-bold mb-6 text-center text-gray-800">Raw Materials Check</h1>
+        
+        <div class="space-y-4 mb-6">
+            <div class="border-2 border-dashed border-blue-200 rounded-lg p-4 hover:border-blue-400 transition-colors">
+                <input type="file" id="inventoryFile" accept=".csv" class="w-full cursor-pointer"/>
+                <p class="text-sm text-gray-500 mt-2">Upload Current Stock CSV</p>
+            </div>
+            
+            <div class="border-2 border-dashed border-blue-200 rounded-lg p-4 hover:border-blue-400 transition-colors">
+                <input type="file" id="ordersFile" accept=".csv" class="w-full cursor-pointer"/>
+                <p class="text-sm text-gray-500 mt-2">Upload Orders/Requirements CSV</p>
+            </div>
+        </div>
+
+        <div class="mb-4">
+            <label class="flex items-center text-sm text-gray-600">
+                <input type="checkbox" id="fuzzyMatch" checked class="mr-2">
+                Enable smart name matching (handles typos & variations)
+            </label>
+        </div>
+        
+        <button id="compareBtn" class="w-full bg-blue-500 text-white py-2 rounded-lg hover:bg-blue-600 transition-colors">
+            Compare Materials
+        </button>
+        
+        <div id="similar" class="mt-4 p-4 bg-yellow-50 rounded-lg text-sm font-mono hidden"></div>
+        <div id="results" class="mt-4 p-4 bg-gray-50 rounded-lg text-sm font-mono hidden"></div>
+    </div>
+
+    <script>
+        let inventoryData = null;
+        let ordersData = null;
+
+        function getSimilarity(s1, s2) {
+            s1 = s1.toLowerCase().replace(/[^a-z0-9]/g, '');
+            s2 = s2.toLowerCase().replace(/[^a-z0-9]/g, '');
+            
+            if (s1 === s2) return 1;
+            if (s1.includes(s2) || s2.includes(s1)) return 0.9;
+            
+            let longer = s1.length > s2.length ? s1 : s2;
+            let shorter = s1.length > s2.length ? s2 : s1;
+            
+            let costs = new Array(shorter.length + 1);
+            for (let i = 0; i <= shorter.length; i++) {
+                costs[i] = i;
+            }
+            
+            let newCosts = new Array(shorter.length + 1);
+            for (let i = 1; i <= longer.length; i++) {
+                newCosts[0] = i;
+                for (let j = 1; j <= shorter.length; j++) {
+                    let cost = longer[i - 1] === shorter[j - 1] ? 0 : 1;
+                    newCosts[j] = Math.min(
+                        costs[j] + 1,
+                        newCosts[j - 1] + 1,
+                        costs[j - 1] + cost
+                    );
+                }
+                let temp = costs;
+                costs = newCosts;
+                newCosts = temp;
+            }
+            return 1 - (costs[shorter.length] / Math.max(longer.length, shorter.length));
+        }
+
+        function findMaterialMatches(name, materials, threshold = 0.8) {
+            return materials.filter(m => getSimilarity(name, m) >= threshold);
+        }
+
+        async function handleFileSelect(file) {
+            return new Promise((resolve) => {
+                Papa.parse(file, {
+                    header: true,
+                    complete: (results) => resolve(results.data)
+                });
+            });
+        }
+
+        document.getElementById('inventoryFile').addEventListener('change', async (e) => {
+            inventoryData = await handleFileSelect(e.target.files[0]);
+        });
+
+        document.getElementById('ordersFile').addEventListener('change', async (e) => {
+            ordersData = await handleFileSelect(e.target.files[0]);
+        });
+
+        document.getElementById('compareBtn').addEventListener('click', () => {
+            if (!inventoryData || !ordersData) {
+                alert('Please upload both files first');
+                return;
+            }
+
+            try {
+                const resultsDiv = document.getElementById('results');
+                const similarDiv = document.getElementById('similar');
+                resultsDiv.classList.remove('hidden');
+                similarDiv.classList.remove('hidden');
+
+                const fuzzyMatch = document.getElementById('fuzzyMatch').checked;
+                const materialMap = new Map();
+                const orderMap = new Map();
+                const similarNames = new Map();
+
+                // Process inventory
+                inventoryData.forEach(row => {
+                    const name = row.Material || row.Name || Object.values(row)[0];
+                    const qty = parseInt(row.Quantity || row.Qty || Object.values(row)[1]) || 0;
+                    if (name) materialMap.set(name.trim(), qty);
+                });
+
+                // Process orders with fuzzy matching
+                ordersData.forEach(row => {
+                    const orderName = (row.Material || row.Name || Object.values(row)[0]).trim();
+                    const orderQty = parseInt(row.Quantity || row.Qty || Object.values(row)[1]) || 0;
+                    
+                    if (fuzzyMatch) {
+                        const materialNames = Array.from(materialMap.keys());
+                        const matches = findMaterialMatches(orderName, materialNames);
+                        
+                        if (matches.length === 1) {
+                            if (matches[0] !== orderName) {
+                                similarNames.set(orderName, matches[0]);
+                            }
+                            const existingQty = orderMap.get(matches[0]) || 0;
+                            orderMap.set(matches[0], existingQty + orderQty);
+                        } else if (matches.length > 1) {
+                            similarNames.set(orderName, matches.join(', '));
+                            orderMap.set(orderName, orderQty);
+                        } else {
+                            orderMap.set(orderName, orderQty);
+                        }
+                    } else {
+                        const existingQty = orderMap.get(orderName) || 0;
+                        orderMap.set(orderName, existingQty + orderQty);
+                    }
+                });
+
+                // Generate results
+                let results = '';
+                let warnings = '';
+
+                if (similarNames.size > 0) {
+                    warnings = '⚠️ Similar material names found:\n\n';
+                    similarNames.forEach((match, name) => {
+                        warnings += `"${name}" might be the same as "${match}"\n`;
+                    });
+                }
+
+                for (const [material, stockQty] of materialMap) {
+                    const orderQty = orderMap.get(material) || 0;
+                    const needed = orderQty - stockQty;
+
+                    if (needed > 0) {
+                        results += `🚨 ${material}:\n`;
+                        results += `   Stock: ${stockQty}\n`;
+                        results += `   Needed: ${orderQty}\n`;
+                        results += `   Shortage: ${needed}\n\n`;
+                    }
+                }
+
+                // Check for orders without matching inventory
+                for (const [material, orderQty] of orderMap) {
+                    if (!materialMap.has(material) && !similarNames.has(material)) {
+                        results += `❓ ${material}:\n`;
+                        results += `   No stock found\n`;
+                        results += `   Ordered: ${orderQty}\n\n`;
+                    }
+                }
+
+                similarDiv.innerHTML = warnings ? 
+                    `<div class="text-yellow-800">${warnings}</div>` : '';
+                    
+                resultsDiv.innerHTML = results ? 
+                    `<div class="text-red-600">${results}</div>` : 
+                    '<div class="text-green-600">✅ All materials have sufficient stock</div>';
+
+            } catch (error) {
+                document.getElementById('results').innerHTML = 
+                    `<div class="text-red-600">Error comparing files: ${error.message}</div>`;
+            }
+        });
+    </script>
+</body>
+</html>
